@@ -1,3 +1,5 @@
+using RootedAndroidGameVM.Core.Downloads;
+
 namespace RootedAndroidGameVM.Core.Ui;
 
 public enum SetupStage
@@ -14,7 +16,8 @@ public sealed record SetupProgressState(
     SetupStage Stage,
     int Percent,
     string Title,
-    string Detail);
+    string Detail,
+    DownloadProgress? Download = null);
 
 public static class SetupProgressCatalog
 {

@@ -29,7 +29,7 @@ public static class ProgramUpgradeProbe
             return string.Equals(await Sha256Verifier.ComputeAsync(ramdisk, cancellationToken).ConfigureAwait(false),
                 journal.PatchedRamdiskSha256, StringComparison.OrdinalIgnoreCase);
         }
-        catch (Exception exception) when (exception is IOException or JsonException or ArgumentException or InvalidOperationException)
+        catch (Exception exception) when (exception is IOException or JsonException or ArgumentException or InvalidOperationException or InvalidDataException)
         {
             return false;
         }

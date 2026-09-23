@@ -21,8 +21,8 @@ public sealed partial class DebugBroker : IDisposable
     private readonly DebugOperationAdmission _admission = new();
     private int _active;
     private StorageOperationLease? _storageLease;
-    private static readonly HashSet<string> Quick = ["status", "memory.snapshot", "capabilities", "schema", "runtime.inspect", "screen", "preview", "apps", "metrics", "checkpoint.list", "files.list", "clipboard", "release", "wake", "key"];
-    private static readonly HashSet<string> Readers = ["status", "memory.snapshot", "capabilities", "schema", "runtime.inspect", "screen", "preview", "preview.benchmark", "frames.sample", "apps", "apps.list", "apps.resolve", "users.list", "files.roots", "files.browse", "files.stat", "files.transfer.plan", "files.transfer.inspect", "files.transfer.list", "files.tools.list", "tools.list", "app.observe", "metrics", "checkpoint.list", "files.list", "files.diff", "logs", "record", "trace", "licenses"];
+    private static readonly HashSet<string> Quick = ["status", "memory.snapshot", "capabilities", "schema", "runtime.inspect", "paths.inspect", "downloads.list", "screen", "preview", "apps", "metrics", "checkpoint.list", "files.list", "clipboard", "release", "wake", "key"];
+    private static readonly HashSet<string> Readers = ["status", "memory.snapshot", "capabilities", "schema", "runtime.inspect", "paths.inspect", "downloads.list", "screen", "preview", "preview.benchmark", "frames.sample", "apps", "apps.list", "apps.resolve", "users.list", "files.roots", "files.browse", "files.stat", "files.transfer.plan", "files.transfer.inspect", "files.transfer.list", "files.tools.list", "tools.list", "app.observe", "metrics", "checkpoint.list", "files.list", "files.diff", "logs", "record", "trace", "licenses"];
     public async Task RunAsync(CancellationToken ct)
     {
         using var linked = CancellationTokenSource.CreateLinkedTokenSource(ct, _shutdown.Token); ct = linked.Token;
@@ -209,7 +209,7 @@ public sealed partial class DebugBroker : IDisposable
     private async Task<DebugReply> InvokeAsync(DebugRequest request, CancellationToken ct)
     {
         var mutate = request.Command != "session.observe" && !Readers.Contains(request.Command);
-        var exclusive = request.Command is "start" or "stop" or "checkpoint.create" or "checkpoint.restore" or "checkpoint.recover" or "runtime.configure";
+        var exclusive = request.Command is "start" or "stop" or "checkpoint.create" or "checkpoint.restore" or "checkpoint.recover" or "runtime.configure" or "paths.configure";
         var entered = false;
         try
         {

@@ -1,0 +1,61 @@
+<Window x:Class="RootedAndroidGameVM.Launcher.PathConfigurationWindow"
+        xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+        xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+        Title="组件路径" Width="820" Height="720" MinWidth="700" MinHeight="620"
+        WindowStartupLocation="CenterOwner" Background="{StaticResource PageBrush}" FontFamily="Segoe UI" Foreground="{StaticResource InkBrush}">
+    <DockPanel Margin="30">
+        <Grid DockPanel.Dock="Bottom" Margin="0,22,0,0">
+            <StackPanel Orientation="Horizontal" HorizontalAlignment="Left">
+                <Button x:Name="CloseButton" Content="关闭" Style="{StaticResource ActionCardButton}" Padding="22,10" Click="Close_Click" />
+                <Button x:Name="ResetButton" Content="恢复默认路径" Style="{StaticResource ActionCardButton}" Padding="18,10" Margin="10,0,0,0" Click="Reset_Click" />
+            </StackPanel>
+            <Button x:Name="SaveButton" Content="保存路径" Style="{StaticResource PrimaryButton}" HorizontalAlignment="Right" MinWidth="140" Click="Save_Click" AutomationProperties.Name="保存组件路径" />
+        </Grid>
+        <ScrollViewer VerticalScrollBarVisibility="Auto" HorizontalScrollBarVisibility="Disabled">
+            <StackPanel Margin="0,0,4,0">
+                <TextBlock Text="组件路径" FontSize="25" FontWeight="SemiBold" />
+                <TextBlock Text="选择 Android SDK、虚拟机和下载缓存的位置。留空表示使用产品自管目录；外部 SDK 只做核验，不会被下载或改写。" FontSize="13" Foreground="{StaticResource MutedBrush}" Margin="0,8,0,0" TextWrapping="Wrap" />
+                <Border Background="#FFF7E6" CornerRadius="12" Padding="16" Margin="0,18,0,0">
+                    <TextBlock x:Name="RunningNoticeText" Text="安卓正在运行。请先在“使用安卓”中停止安卓，再修改组件路径。" FontSize="12" Foreground="#8A6D3B" TextWrapping="Wrap" Visibility="Collapsed" />
+                </Border>
+                <Border Background="White" CornerRadius="14" Padding="20" Margin="0,18,0,0" BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="Android SDK 文件夹" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="必须包含 platform-tools、emulator 和已 Root 的 android-35 google_apis_playstore x86_64 系统镜像；缺少 cmdline-tools 时会在安装/核验时自动补装，不会改动系统镜像与 platform-tools。" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,10,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBox x:Name="SdkPathTextBox" Padding="10" FontSize="13" VerticalContentAlignment="Center" BorderBrush="#D6DCE6" BorderThickness="1" AutomationProperties.Name="Android SDK 文件夹" />
+                            <Button Grid.Column="1" Content="浏览…" Style="{StaticResource ActionCardButton}" Padding="18,9" Margin="10,0,0,0" Click="BrowseSdk_Click" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+                <Border Background="White" CornerRadius="14" Padding="20" Margin="0,16,0,0" BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="虚拟机 (AVD) 文件夹" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="产品只管理自己的 rooted_android_game_vm_api35，不会接管或删除其他 AVD。" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,10,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBox x:Name="AvdPathTextBox" Padding="10" FontSize="13" VerticalContentAlignment="Center" BorderBrush="#D6DCE6" BorderThickness="1" AutomationProperties.Name="虚拟机文件夹" />
+                            <Button Grid.Column="1" Content="浏览…" Style="{StaticResource ActionCardButton}" Padding="18,9" Margin="10,0,0,0" Click="BrowseAvd_Click" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+                <Border Background="White" CornerRadius="14" Padding="20" Margin="0,16,0,0" BorderBrush="{StaticResource LineBrush}" BorderThickness="1">
+                    <StackPanel>
+                        <TextBlock Text="下载缓存文件夹" FontSize="14" FontWeight="SemiBold" />
+                        <TextBlock Text="固定组件的下载与校验缓存；切换磁盘时可用于腾出空间。" FontSize="12" Foreground="{StaticResource MutedBrush}" Margin="0,6,0,0" TextWrapping="Wrap" />
+                        <Grid Margin="0,10,0,0">
+                            <Grid.ColumnDefinitions><ColumnDefinition Width="*" /><ColumnDefinition Width="Auto" /></Grid.ColumnDefinitions>
+                            <TextBox x:Name="CachePathTextBox" Padding="10" FontSize="13" VerticalContentAlignment="Center" BorderBrush="#D6DCE6" BorderThickness="1" AutomationProperties.Name="下载缓存文件夹" />
+                            <Button Grid.Column="1" Content="浏览…" Style="{StaticResource ActionCardButton}" Padding="18,9" Margin="10,0,0,0" Click="BrowseCache_Click" />
+                        </Grid>
+                    </StackPanel>
+                </Border>
+                <TextBlock Text="当前生效" FontSize="14" FontWeight="SemiBold" Margin="0,22,0,8" />
+                <Border Background="#EBEDF9" CornerRadius="12" Padding="18">
+                    <TextBlock x:Name="EffectiveText" FontSize="12" Foreground="{StaticResource MutedBrush}" TextWrapping="Wrap" />
+                </Border>
+            </StackPanel>
+        </ScrollViewer>
+    </DockPanel>
+</Window>

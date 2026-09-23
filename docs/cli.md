@@ -138,10 +138,19 @@ App结构化观察最多缓存10秒，返回原observedAt；refresh:true强制�
 |---|---|---|
 | `runtime.inspect` | `{}` | 请求配置、实际显示、宿主内存；停机时附启动余量检查 |
 | `runtime.configure` | `{"profile":{"renderer":"host","width":1920,"height":1080,"density":240,"refreshRate":120,"memoryMb":3072,"cpuCores":4,"desktopDisplay":true}}` | 停机后保存；下次启动生效 |
+| `paths.inspect` | `{}` | 资源根、SDK、AVD 与下载缓存的实际位置及来源（产品自管或外部复用） |
+| `paths.configure` | `{"sdkRoot":"D:\\Android\\Sdk","avdHome":null,"downloadCache":null}` | 停机后保存组件路径；`null` 恢复产品默认 |
+| `downloads.list` | `{}` | 安装所需组件清单：文件名、URL、SHA-256、大小与缓存校验状态 |
+| `downloads.import` | `{"folder":"D:\\rgvm-downloads"}` | 从本地文件夹导入已下载组件，按 SHA-256 校验后写入下载缓存 |
+| `downloads.mirror` | `{"preset":"china"}`，或 `{"rules":[{"from":"https://dl.google.com/android/repository/","to":"https://mirror.example/"}]}`，或 `{"clear":true}` | 设置/清除下载镜像；内置国内预设 |
 | `frames.sample` | `{"package":"test.app","seconds":30}` | 实际呈现帧率、间隔分布和采样覆盖 |
 | `files.export` | `{"package":"test.app","scope":"private","remote":"files/qa","local":"D:\\exports"}` | 导出指定目录，核验并受控解包 |
 | `uninstall` | `{"package":"test.app","confirm":true}` | 卸载普通第三方应用；删除该应用数据 |
 | `window.focus` | `{}` | 打开已经验证的产品安卓窗口 |
+
+`paths.configure` 保存 SDK、AVD 与下载缓存的独立位置；留空或 `null` 表示产品自管默认路径。`sdkRoot` 指向本机已有 Android SDK 时按“外部复用”处理：只核验系统镜像与已 Root 状态，不改写系统镜像与 platform-tools；缺少 cmdline-tools 时会补装到该 SDK，系统镜像尚未 Root 会在安装/核验时明确失败。`avdHome` 与 `downloadCache` 可分别放到其他磁盘；产品仍只管理自己的 `rooted_android_game_vm_api35`，不会接管其他 AVD。配置写入控制目录的 `install-paths.json`，GUI 的“组件路径”与 CLI 使用同一配置服务；修改后下次启动生效。
+
+下载失败时可用 `downloads.list` 查看每个组件的文件名、URL、SHA-256、大小与缓存状态，再用浏览器或下载器自行下载。把文件放入任意文件夹后执行 `downloads.import`（或安装向导的“从本地文件夹导入组件”），只接受 SHA-256 匹配的文件，校验通过即写入下载缓存，安装器随后离线使用。`downloads.mirror` 可把 `dl.google.com`/`github.com`/`download.visualstudio.microsoft.com` 等前缀替换为镜像（仍强制 SHA-256 校验，镜像无法替换内容）；`downloads.list` 的 `effectiveUrl` 显示实际请求地址、`presets` 列出内置预设。国内环境可直接 `{"preset":"china"}`：Google SDK 走腾讯云 `mirrors.cloud.tencent.com/AndroidSDK`，GitHub 走 `ghfast.top` 代理；ghfast 不可用时用 `{"preset":"china-alt"}`（GitHub 改走 `gh-proxy.com`）。Microsoft JDK 无国内镜像，保持直连或手动导入。
 
 `status.hostMemory` 报告宿主物理余量与提交余量；`memoryProtection` 在警告或自动停机时给出原因。`start` 可能返回 `host_memory_low`，请处理容量不足后重试，不循环强行启动。`preview` 是 GUI 的二进制管道协议：JSON 元数据帧后紧跟 PNG 帧；命令行取证请使用 `screen`，不要把元数据当成已经收到 PNG。
 

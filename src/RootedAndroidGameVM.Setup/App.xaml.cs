@@ -13,6 +13,16 @@ public partial class App : Application
     protected override void OnStartup(StartupEventArgs e)
     {
         base.OnStartup(e);
+        DispatcherUnhandledException += (_, args) =>
+        {
+            args.Handled = true;
+            MessageBox.Show(
+                LogRedactor.RedactLocalPaths(args.Exception.Message),
+                "安装器错误",
+                MessageBoxButton.OK,
+                MessageBoxImage.Error);
+            Shutdown(1);
+        };
         if (e.Args.Length == 2 && e.Args[0] == "--remove-resources" && e.Args[1] is "runtime" or "all")
         {
             ShutdownMode = ShutdownMode.OnExplicitShutdown;

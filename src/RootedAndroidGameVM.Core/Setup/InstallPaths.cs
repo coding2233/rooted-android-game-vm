@@ -12,20 +12,29 @@ public sealed record InstallPaths(
     string RootAvdRoot,
     string DownloadCache)
 {
-    public static InstallPaths CreateDefault(string? controlRoot = null) =>
-        FromProductRoot(new ProductStorageLocation(controlRoot).ReadRoot());
+    /// <summary>True when the SDK lives outside the product resource root (reused, verify-only).</summary>
+    public bool SdkIsExternal => !StoragePathPolicy.Contains(ProductRoot, SdkRoot);
 
-    public static InstallPaths FromProductRoot(string productRoot)
+    /// <summary>True when the AVD home lives outside the product resource root.</summary>
+    public bool AvdIsExternal => !StoragePathPolicy.Contains(ProductRoot, AvdHome);
+
+    public static InstallPaths CreateDefault(string? controlRoot = null) =>
+        FromProductRoot(
+            new ProductStorageLocation(controlRoot).ReadRoot(),
+            new InstallPathConfigurationStore(controlRoot).Read());
+
+    public static InstallPaths FromProductRoot(string productRoot, InstallPathConfiguration? configuration = null)
     {
         var root = Path.GetFullPath(productRoot);
+        var config = configuration ?? InstallPathConfiguration.Empty;
         var runtime = PathBoundary.EnsureWithinRoot(root, Path.Combine(root, "runtime"));
         return new(
             root,
             runtime,
-            PathBoundary.EnsureWithinRoot(root, Path.Combine(runtime, "android-sdk")),
+            config.SdkRoot ?? PathBoundary.EnsureWithinRoot(root, Path.Combine(runtime, "android-sdk")),
             PathBoundary.EnsureWithinRoot(root, Path.Combine(runtime, "java")),
-            PathBoundary.EnsureWithinRoot(root, Path.Combine(runtime, "avd")),
+            config.AvdHome ?? PathBoundary.EnsureWithinRoot(root, Path.Combine(runtime, "avd")),
             PathBoundary.EnsureWithinRoot(root, Path.Combine(runtime, "rootavd")),
-            PathBoundary.EnsureWithinRoot(root, Path.Combine(root, "downloads")));
+            config.DownloadCache ?? PathBoundary.EnsureWithinRoot(root, Path.Combine(root, "downloads")));
     }
 }

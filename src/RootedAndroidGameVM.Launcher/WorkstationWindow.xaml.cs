@@ -196,6 +196,17 @@ public partial class WorkstationWindow : Window
         catch (Exception error) { ViewModel.Message = error.Message; }
         finally { if (!_offline) _previewTimer.Start(); }
     }
+    private async void ComponentPaths_Click(object sender, RoutedEventArgs e)
+    {
+        try
+        {
+            _previewTimer.Stop();
+            new PathConfigurationWindow(ViewModel.IsRunning) { Owner = this }.ShowDialog();
+            if (!_offline) await ViewModel.RefreshAsync();
+        }
+        catch (Exception error) { ViewModel.Message = error.Message; }
+        finally { if (!_offline) _previewTimer.Start(); }
+    }
     private void Repair_Click(object sender, RoutedEventArgs e)
     {
         var executable = Path.Combine(AppContext.BaseDirectory, "RootedAndroidGameVM.Setup.exe");

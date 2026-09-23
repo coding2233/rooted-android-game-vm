@@ -20,6 +20,46 @@ public sealed class AndroidInteractiveSessionServiceTests
     }
 
     [Fact]
+    public async Task Interactive_session_retries_a_transient_wake_failure()
+    {
+        var runner = new FlakyWakeRunner(wakeFailures: 1, stateText: "mWakefulness=Asleep");
+        var layout = AndroidSdkLayout.FromRoot(@"D:\Product\Sdk");
+        var options = AndroidVmOptions.Default;
+
+        await new AndroidInteractiveSessionService(layout, options, runner).PrepareAsync();
+
+        Assert.Equal(2, runner.WakeCalls);
+        Assert.Contains(runner.Commands, command => command.Arguments.Any(argument => argument.Contains("mWakefulness")));
+    }
+
+    [Fact]
+    public async Task Interactive_session_succeeds_when_the_device_is_already_awake()
+    {
+        var runner = new FlakyWakeRunner(
+            wakeFailures: 3,
+            stateText: "mWakefulness=Awake" + Environment.NewLine + "mShowingLockscreen=false");
+        var layout = AndroidSdkLayout.FromRoot(@"D:\Product\Sdk");
+        var options = AndroidVmOptions.Default;
+
+        await new AndroidInteractiveSessionService(layout, options, runner).PrepareAsync();
+
+        Assert.Equal(1, runner.WakeCalls);
+    }
+
+    [Fact]
+    public async Task Interactive_session_fails_when_the_device_stays_asleep()
+    {
+        var runner = new FlakyWakeRunner(wakeFailures: 3, stateText: "mWakefulness=Asleep");
+        var layout = AndroidSdkLayout.FromRoot(@"D:\Product\Sdk");
+        var options = AndroidVmOptions.Default;
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new AndroidInteractiveSessionService(layout, options, runner).PrepareAsync());
+
+        Assert.Equal(3, runner.WakeCalls);
+    }
+
+    [Fact]
     public void Magisk_open_failure_keeps_the_last_ui_diagnostic_in_the_top_level_message()
     {
         var message = MagiskPolicyAutomator.FormatOpenFailure(
@@ -202,6 +242,31 @@ public sealed class AndroidInteractiveSessionServiceTests
             CancellationToken cancellationToken = default)
         {
             Commands.Add(spec);
+            return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
+        }
+    }
+
+    private sealed class FlakyWakeRunner(int wakeFailures, string stateText) : IProcessRunner
+    {
+        public int WakeCalls { get; private set; }
+        public List<ProcessSpec> Commands { get; } = [];
+
+        public Task<ProcessResult> RunAsync(
+            ProcessSpec spec,
+            CancellationToken cancellationToken = default)
+        {
+            Commands.Add(spec);
+            if (spec.Arguments.Any(argument => argument.Contains("KEYCODE_WAKEUP")))
+            {
+                WakeCalls++;
+                return Task.FromResult(WakeCalls <= wakeFailures
+                    ? new ProcessResult(1, string.Empty, "Error: Could not access the input manager")
+                    : new ProcessResult(0, string.Empty, string.Empty));
+            }
+            if (spec.Arguments.Any(argument => argument.Contains("mWakefulness")))
+            {
+                return Task.FromResult(new ProcessResult(0, stateText, string.Empty));
+            }
             return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
         }
     }

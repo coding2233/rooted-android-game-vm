@@ -8,6 +8,7 @@ using System.Buffers.Binary;
 using System.Runtime.Versioning;
 using Grpc.Core;
 using RootedAndroidGameVM.Core.Android;
+using RootedAndroidGameVM.Core.Downloads;
 using RootedAndroidGameVM.Core.Setup;
 using RootedAndroidGameVM.Core.Processes;
 
@@ -449,6 +450,44 @@ public sealed partial class AndroidDebugService : IDisposable
                 var hostCapacity = HostMemory.Read();
                 return await new RuntimeProfileStore(Paths).ApplyAsync(requested, Instance.RequireStopped,
                     hostCapacity.TotalMb, hostCapacity.LogicalCores, ct);
+            case "paths.inspect": return InspectInstallPaths();
+            case "paths.configure":
+                Instance.RequireStopped();
+                var pathService = new InstallPathConfigurationService();
+                var currentPaths = pathService.Read();
+                var change = await pathService.ConfigureAsync(
+                    OptionalPath(request, "sdkRoot", currentPaths.SdkRoot),
+                    OptionalPath(request, "avdHome", currentPaths.AvdHome),
+                    OptionalPath(request, "downloadCache", currentPaths.DownloadCache),
+                    ct);
+                return new
+                {
+                    saved = true,
+                    configurationPath = pathService.ConfigurationPath,
+                    sdkRoot = change.Paths.SdkRoot,
+                    sdkSource = change.Paths.SdkIsExternal ? "external" : "product",
+                    avdHome = change.Paths.AvdHome,
+                    avdSource = change.Paths.AvdIsExternal ? "external" : "product",
+                    downloadCache = change.Paths.DownloadCache,
+                    nextStart = change.NextStartRequired,
+                    note = change.Paths.SdkIsExternal
+                        ? "外部 SDK 不会改动系统镜像与 platform-tools；缺少 cmdline-tools 时安装器会补装，请用安装器核验组件与 Root。"
+                        : "路径已保存；产品自管组件仍位于资源根内。"
+                };
+            case "downloads.list": return await InspectDownloadsAsync(ct);
+            case "downloads.import":
+                var folder = request.Text("folder");
+                if (string.IsNullOrWhiteSpace(folder)) throw new ArgumentException("缺少 folder。");
+                var imported = await new DependencyImportService().ImportAsync(folder, Paths.DownloadCache, ct);
+                return new
+                {
+                    cache = Paths.DownloadCache,
+                    imported = imported.Count(item => item.Outcome == "imported"),
+                    verified = imported.Count(item => item.Outcome is "imported" or "already-cached"),
+                    total = imported.Count,
+                    results = imported
+                };
+            case "downloads.mirror": return await ConfigureDownloadMirrorAsync(request, ct);
             case "display.desktop": return await ApplyDesktopAppearanceAsync(request.Flag("enabled"), ct);
             case "capabilities":
                 return new
@@ -474,6 +513,13 @@ public sealed partial class AndroidDebugService : IDisposable
                         legacySharedDirectory = "Download",
                         plannedParentDirectories = true,
                         sourceTargetName = true
+                    },
+                    pathConfiguration = new
+                    {
+                        configurable = new[] { "sdkRoot", "avdHome", "downloadCache" },
+                        externalSdkPolicy = "verify-only",
+                        configure = "paths.configure",
+                        inspect = "paths.inspect"
                     },
                     commands = DebugCommandCatalog.Commands.Select(command => command.Name).ToArray()
                 };
@@ -555,5 +601,103 @@ public sealed partial class AndroidDebugService : IDisposable
             default: throw new ArgumentException("未知命令：" + request.Command);
         }
     }
+    private object InspectInstallPaths()
+    {
+        var service = new InstallPathConfigurationService();
+        var configuration = service.Read();
+        return new
+        {
+            productRoot = Paths.ProductRoot,
+            runtimeRoot = Paths.RuntimeRoot,
+            sdkRoot = Paths.SdkRoot,
+            sdkSource = Paths.SdkIsExternal ? "external" : "product",
+            javaHome = Paths.JavaHome,
+            avdHome = Paths.AvdHome,
+            avdSource = Paths.AvdIsExternal ? "external" : "product",
+            rootAvdRoot = Paths.RootAvdRoot,
+            downloadCache = Paths.DownloadCache,
+            overrides = new
+            {
+                sdkRoot = configuration.SdkRoot,
+                avdHome = configuration.AvdHome,
+                downloadCache = configuration.DownloadCache
+            },
+            configurationPath = service.ConfigurationPath,
+            sdkToolsPresent = File.Exists(Layout.AdbPath) && File.Exists(Layout.EmulatorPath),
+            cmdlineToolsPresent = Layout.FindCommandLineToolsBin() is not null
+        };
+    }
+
+    private static string? OptionalPath(DebugRequest request, string key, string? fallback)
+    {
+        if (request.Arguments?.TryGetValue(key, out var value) != true) return fallback;
+        return value.ValueKind == JsonValueKind.Null ? null : value.GetString() ?? fallback;
+    }
+
+    private async Task<object> InspectDownloadsAsync(CancellationToken ct)
+    {
+        var store = new DownloadSourceConfigurationStore();
+        var configuration = store.Read();
+        var states = await DependencyDownloadCatalog.InspectAsync(
+            Paths.DownloadCache, configuration, cancellationToken: ct);
+        return new
+        {
+            cache = Paths.DownloadCache,
+            configurationPath = store.FilePath,
+            mirrorRules = configuration.Rules,
+            presets = DownloadMirrorPresets.All.Select(preset => new { preset.Id, preset.Name, preset.Description }),
+            cachedCount = states.Count(state => state.Verified),
+            total = states.Count,
+            components = states.Select(state => new
+            {
+                state.Item.Id,
+                state.Item.Name,
+                state.Item.Version,
+                state.Item.ArchiveFileName,
+                state.Item.Url,
+                effectiveUrl = state.EffectiveUrl,
+                state.Item.Sha256,
+                state.Item.Size,
+                cached = state.Verified,
+                bytesOnDisk = state.BytesOnDisk,
+                partialPresent = state.PartialPresent
+            })
+        };
+    }
+
+    private async Task<object> ConfigureDownloadMirrorAsync(DebugRequest request, CancellationToken ct)
+    {
+        var store = new DownloadSourceConfigurationStore();
+        var presetId = request.Text("preset");
+        if (!string.IsNullOrWhiteSpace(presetId))
+        {
+            var preset = DownloadMirrorPresets.Find(presetId)
+                ?? throw new ArgumentException($"未知镜像预设：{presetId}。");
+            var presetConfiguration = DownloadSourceConfiguration.Create(preset.Rules);
+            await store.SaveAsync(presetConfiguration, ct);
+            return new
+            {
+                saved = true,
+                preset = preset.Id,
+                name = preset.Name,
+                rules = presetConfiguration.Rules,
+                configurationPath = store.FilePath
+            };
+        }
+        if (request.Flag("clear"))
+        {
+            store.Clear();
+            return new { cleared = true, rules = Array.Empty<object>(), configurationPath = store.FilePath };
+        }
+        var rules = request.Value<MirrorRule[]>("rules")
+            ?? throw new ArgumentException("缺少 rules；可用 preset:\"china\"，或传 clear:true 恢复直连。");
+        var configuration = DownloadSourceConfiguration.Create(
+            rules.Select(rule => DownloadSourceRule.Create(rule.From, rule.To)));
+        await store.SaveAsync(configuration, ct);
+        return new { saved = true, rules = configuration.Rules, configurationPath = store.FilePath };
+    }
+
+    private sealed record MirrorRule(string From, string To);
+
     public void Dispose() { Transport.Dispose(); Instance.Dispose(); _stateGate.Dispose(); _captureGate.Dispose(); _summaryGate.Dispose(); _catalogGate.Dispose(); _helperGate.Dispose(); }
 }

@@ -24,10 +24,11 @@ public sealed class RootedVmInstaller
         _paths = paths ?? InstallPaths.CreateDefault();
         _runner = runner ?? new ProcessRunner();
         _options = options ?? AndroidVmOptions.ForPaths(_paths);
-        _downloader = new VerifiedDownloader(httpClient ?? new HttpClient
-        {
-            Timeout = TimeSpan.FromMinutes(30)
-        });
+        var downloadSource = new DownloadSourceConfigurationStore().Read();
+        _downloader = new VerifiedDownloader(
+            httpClient ?? new HttpClient { Timeout = System.Threading.Timeout.InfiniteTimeSpan },
+            retryDelay: null,
+            sourceRewriter: downloadSource.Rewrite);
     }
 
     public async Task InstallAsync(
@@ -43,12 +44,21 @@ public sealed class RootedVmInstaller
             throw new InvalidOperationException("必须先阅读并接受 Android SDK 许可协议。");
         }
 
+        _downloader.Progress = SetupDownloadProgress.Create(progress);
+
         Report(progress, SetupStage.Preflight);
         RunPreflight();
         Directory.CreateDirectory(_paths.ProductRoot);
         Directory.CreateDirectory(_paths.RuntimeRoot);
         Directory.CreateDirectory(_paths.DownloadCache);
+        await DependencyDownloadCatalog.AdoptAllAsync(_paths.DownloadCache, cancellationToken: cancellationToken);
         await WriteJournalAsync(SetupStage.Preflight, cancellationToken);
+
+        if (_paths.SdkIsExternal)
+        {
+            await VerifyExternalSdkAsync(progress, cancellationToken);
+            return;
+        }
 
         if (adoptExistingEnvironment)
         {
@@ -96,6 +106,86 @@ public sealed class RootedVmInstaller
         }
 
         await VerifyAndRecordAsync(layout, controller, progress, cancellationToken);
+    }
+
+    /// <summary>
+    /// Path for a user-provided external SDK. The product never touches the external system
+    /// images or platform-tools, but it will install the pinned command-line tools into the
+    /// SDK when they are missing so avdmanager can create the product AVD. It requires an
+    /// already-rooted system image and fails closed otherwise.
+    /// </summary>
+    private async Task VerifyExternalSdkAsync(
+        IProgress<SetupProgressState>? progress,
+        CancellationToken cancellationToken)
+    {
+        Report(progress, SetupStage.Download);
+        await WriteJournalAsync(SetupStage.Download, cancellationToken);
+        var layout = AndroidSdkLayout.FromRoot(_paths.SdkRoot);
+        if (!layout.HasRequiredTools)
+        {
+            throw new FileNotFoundException(
+                $"外部 SDK 缺少 platform-tools\\adb.exe 或 emulator\\emulator.exe：{layout.Root}。");
+        }
+        await PrepareJavaAsync(cancellationToken);
+        await EnsureCommandLineToolsAsync(layout, cancellationToken);
+        VerifyExternalSdkComponents(layout);
+        await VerifyAccelerationAsync(layout, cancellationToken);
+
+        _options = _options with { AvdHome = _options.AvdHome ?? _paths.AvdHome };
+        Directory.CreateDirectory(_options.AvdHome);
+
+        Report(progress, SetupStage.CreateAvd);
+        await WriteJournalAsync(SetupStage.CreateAvd, cancellationToken);
+        await CreateAvdAsync(layout, cancellationToken);
+        var controller = new AndroidVmController(layout, _options);
+        await controller.StartAsync(cancellationToken);
+
+        Report(progress, SetupStage.Root);
+        await WriteJournalAsync(SetupStage.Root, cancellationToken);
+        if (await GetRootPreparationStateAsync(layout, cancellationToken) == RootPreparationState.NeedsPatch)
+        {
+            await controller.StopAsync(cancellationToken);
+            throw new InvalidOperationException(
+                "外部 SDK 的系统镜像尚未 Root。产品不会改写外部 SDK；请改用产品自管 SDK，或先在外部环境完成 Root。");
+        }
+
+        await VerifyAndRecordAsync(layout, controller, progress, cancellationToken);
+    }
+
+    private async Task EnsureCommandLineToolsAsync(AndroidSdkLayout layout, CancellationToken cancellationToken)
+    {
+        if (layout.FindCommandLineToolsBin() is not null) return;
+        await PrepareCommandLineToolsAsync(layout, cancellationToken);
+    }
+
+    private static void VerifyExternalSdkComponents(AndroidSdkLayout layout)
+    {
+        if (!layout.HasRequiredTools)
+        {
+            throw new FileNotFoundException(
+                $"外部 SDK 缺少 platform-tools\\adb.exe 或 emulator\\emulator.exe：{layout.Root}。");
+        }
+        if (layout.FindCommandLineToolsBin() is null)
+        {
+            throw new FileNotFoundException(
+                $"外部 SDK 缺少 cmdline-tools（需要 avdmanager.bat）：{layout.Root}。");
+        }
+        foreach (var component in InstallProfile.SdkComponents)
+        {
+            var directory = Path.Combine(layout.Root, component.RelativeDirectory);
+            if (!Directory.Exists(directory))
+            {
+                throw new DirectoryNotFoundException(
+                    $"外部 SDK 缺少所需组件 '{component.PackagePath}'（{directory}）。");
+            }
+        }
+        var ramdisk = Path.Combine(
+            layout.Root,
+            "system-images", "android-35", "google_apis_playstore", "x86_64", "ramdisk.img");
+        if (!File.Exists(ramdisk))
+        {
+            throw new FileNotFoundException("外部 SDK 的系统镜像缺少 ramdisk.img。", ramdisk);
+        }
     }
 
     private async Task<RootPreparationState> GetRootPreparationStateAsync(
@@ -349,7 +439,9 @@ public sealed class RootedVmInstaller
             .Any(name => name.Trim() == options.AvdName);
         if (!exists)
         {
-            var avdManager = Path.Combine(layout.Root, "cmdline-tools", "latest", "bin", "avdmanager.bat");
+            var avdManagerBin = layout.FindCommandLineToolsBin()
+                ?? throw new FileNotFoundException("找不到 Android SDK 命令行工具（cmdline-tools）。", layout.Root);
+            var avdManager = Path.Combine(avdManagerBin, "avdmanager.bat");
             var request = new ProcessRequest(
                 new ProcessSpec(
                     avdManager,
@@ -724,5 +816,51 @@ public sealed class RootedVmInstaller
 
     private InstallJournalStore Journal =>
         new(Path.Combine(_paths.ProductRoot, "install-state.json"));
+
+    private sealed class SetupDownloadProgress(IProgress<SetupProgressState> progress, long totalBytes)
+        : IProgress<DownloadProgress>
+    {
+        private string? _component;
+        private long _currentReceived;
+        private long _completed;
+        private long _lastReported;
+        private long _lastTick;
+        private int _lastPercent = 25;
+
+        public static IProgress<DownloadProgress>? Create(IProgress<SetupProgressState>? progress)
+        {
+            if (progress is null) return null;
+            var total = DependencyDownloadCatalog.Required().Sum(item => item.Size);
+            return new SetupDownloadProgress(progress, total);
+        }
+
+        public void Report(DownloadProgress value)
+        {
+            if (value.Notice is not null)
+            {
+                progress.Report(new SetupProgressState(SetupStage.Download, _lastPercent, "下载运行环境",
+                    $"{value.Component}：{value.Notice}", value));
+                return;
+            }
+            if (!string.Equals(_component, value.Component, StringComparison.Ordinal))
+            {
+                _completed += _currentReceived;
+                _component = value.Component;
+                _currentReceived = 0;
+                _lastReported = 0;
+            }
+            _currentReceived = value.ReceivedBytes;
+            var received = _completed + _currentReceived;
+            var complete = value.TotalBytes > 0 && value.ReceivedBytes >= value.TotalBytes;
+            var now = Environment.TickCount64;
+            if (!complete && received - _lastReported < 1024 * 1024 && now - _lastTick < 250) return;
+            _lastReported = received;
+            _lastTick = now;
+            var percent = totalBytes <= 0 ? 25 : 10 + (int)Math.Min(40, 40.0 * received / totalBytes);
+            _lastPercent = percent;
+            progress.Report(new SetupProgressState(SetupStage.Download, percent, "下载运行环境",
+                $"{value.Component}：{received / (1024d * 1024):F0}/{totalBytes / (1024d * 1024):F0} MB", value));
+        }
+    }
 
 }
