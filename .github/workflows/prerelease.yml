@@ -1,0 +1,55 @@
+name: Prerelease
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  prerelease:
+    runs-on: windows-2025
+    timeout-minutes: 60
+    steps:
+      - name: Check out the latest commit on main
+        uses: actions/checkout@fbc6f3992d24b796d5a048ff273f7fcc4a7b6c09 # v5
+        with:
+          ref: main
+          fetch-depth: 0
+
+      - name: Install pinned .NET SDK
+        uses: actions/setup-dotnet@d4c94342e560b34958eacfc5d055d21461ed1c5d # v5.0.0
+        with:
+          dotnet-version: '10.0.400'
+
+      - name: Provision pinned Inno Setup
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: .\build\Prepare-InnoSetup.ps1
+
+      - name: Remove any existing prerelease and tag
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release delete prerelease --yes --cleanup-tag 2>$null
+          if ($LASTEXITCODE -ne 0) { Write-Output 'No existing prerelease release to delete.' }
+          git push origin ':refs/tags/prerelease' 2>$null
+          if ($LASTEXITCODE -ne 0) { Write-Output 'No existing prerelease tag to delete.' }
+          exit 0
+
+      - name: Build, test and package
+        shell: pwsh
+        run: .\build\Build-Prerelease.ps1
+
+      - name: Create the prerelease from the latest commit and upload assets
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $target = (git rev-parse HEAD).Trim()
+          $assets = @(Get-ChildItem -LiteralPath 'artifacts\release' -File | ForEach-Object FullName)
+          if ($assets.Count -eq 0) { throw 'No prerelease assets were produced.' }
+          gh release create prerelease $assets --prerelease --target $target --title 'prerelease' --notes "自动预发布（UNSIGNED），基于提交 $target。"
+          if ($LASTEXITCODE -ne 0) { throw 'Prerelease creation failed.' }
