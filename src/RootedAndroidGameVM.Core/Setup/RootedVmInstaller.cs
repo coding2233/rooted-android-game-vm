@@ -31,7 +31,12 @@ public sealed class RootedVmInstaller
             sourceRewriter: downloadSource.Rewrite);
     }
 
-    public async Task InstallAsync(
+    /// <summary>
+    /// Installs or upgrades the product environment. Returns true when Root was verified; Root
+    /// is an optional capability, so a Root-only failure downgrades to a warning instead of
+    /// blocking an otherwise working virtual machine.
+    /// </summary>
+    public async Task<bool> InstallAsync(
         bool sdkLicenseAccepted,
         IProgress<SetupProgressState>? progress = null,
         CancellationToken cancellationToken = default,
@@ -56,8 +61,7 @@ public sealed class RootedVmInstaller
 
         if (_paths.SdkIsExternal)
         {
-            await VerifyExternalSdkAsync(progress, cancellationToken);
-            return;
+            return await VerifyExternalSdkAsync(progress, cancellationToken);
         }
 
         if (adoptExistingEnvironment)
@@ -68,8 +72,7 @@ public sealed class RootedVmInstaller
                 var existingController = new AndroidVmController(existingLayout, _options);
                 if (await existingController.GetStatusAsync(cancellationToken) != VmStatus.NotInstalled)
                 {
-                    await VerifyAndRecordAsync(existingLayout, existingController, progress, cancellationToken);
-                    return;
+                    return await VerifyAndRecordAsync(existingLayout, existingController, progress, cancellationToken, rootProblem: null);
                 }
             }
         }
@@ -94,18 +97,27 @@ public sealed class RootedVmInstaller
 
         Report(progress, SetupStage.Root);
         await WriteJournalAsync(SetupStage.Root, cancellationToken);
+        string? rootProblem = null;
         if (await GetRootPreparationStateAsync(layout, cancellationToken) == RootPreparationState.NeedsPatch)
         {
-            await PrepareRootToolsAsync(cancellationToken);
-            await RestoreStockRamdiskWhenAvailableAsync(layout, cancellationToken);
-            await PatchRootAsync(layout, cancellationToken);
-            await RecordRamdiskHashesAsync(layout, cancellationToken);
-            await controller.StopAsync(cancellationToken);
-            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
-            DeleteAvdInitrdCache();
+            try
+            {
+                await PrepareRootToolsAsync(cancellationToken);
+                await RestoreStockRamdiskWhenAvailableAsync(layout, cancellationToken);
+                await PatchRootAsync(layout, cancellationToken);
+                await RecordRamdiskHashesAsync(layout, cancellationToken);
+                await controller.StopAsync(cancellationToken);
+                await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+                DeleteAvdInitrdCache();
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                // Root is optional: record the failure and keep installing the virtual machine.
+                rootProblem = error.Message;
+            }
         }
 
-        await VerifyAndRecordAsync(layout, controller, progress, cancellationToken);
+        return await VerifyAndRecordAsync(layout, controller, progress, cancellationToken, rootProblem);
     }
 
     /// <summary>
@@ -114,7 +126,7 @@ public sealed class RootedVmInstaller
     /// SDK when they are missing so avdmanager can create the product AVD. It requires an
     /// already-rooted system image and fails closed otherwise.
     /// </summary>
-    private async Task VerifyExternalSdkAsync(
+    private async Task<bool> VerifyExternalSdkAsync(
         IProgress<SetupProgressState>? progress,
         CancellationToken cancellationToken)
     {
@@ -149,7 +161,7 @@ public sealed class RootedVmInstaller
                 "外部 SDK 的系统镜像尚未 Root。产品不会改写外部 SDK；请改用产品自管 SDK，或先在外部环境完成 Root。");
         }
 
-        await VerifyAndRecordAsync(layout, controller, progress, cancellationToken);
+        return await VerifyAndRecordAsync(layout, controller, progress, cancellationToken, rootProblem: null);
     }
 
     private async Task EnsureCommandLineToolsAsync(AndroidSdkLayout layout, CancellationToken cancellationToken)
@@ -292,11 +304,7 @@ public sealed class RootedVmInstaller
 
     private void DeleteAvdInitrdCache()
     {
-        var avdHome = _options.AvdHome ?? Path.Combine(
-            Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-            ".android",
-            "avd");
-        var initrd = Path.Combine(avdHome, $"{_options.AvdName}.avd", "initrd");
+        var initrd = Path.Combine(_options.AvdDirectory, "initrd");
         if (File.Exists(initrd))
         {
             File.SetAttributes(initrd, FileAttributes.Normal);
@@ -432,11 +440,10 @@ public sealed class RootedVmInstaller
     private async Task CreateAvdAsync(AndroidSdkLayout layout, CancellationToken cancellationToken)
     {
         var options = _options;
-        var list = await _runner.RunRequestAsync(
-            AndroidCommandFactory.ListAvds(layout, options),
-            cancellationToken);
-        var exists = list.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-            .Any(name => name.Trim() == options.AvdName);
+        // The AVD definition file decides whether the AVD must be created. The emulator's
+        // "-list-avds" probe intermittently prints nothing with a zero exit code, and acting on
+        // that empty output would re-run "avdmanager create avd --force" over an existing AVD.
+        var exists = options.HasAvdConfiguration;
         if (!exists)
         {
             var avdManagerBin = layout.FindCommandLineToolsBin()
@@ -453,13 +460,7 @@ public sealed class RootedVmInstaller
             EnsureSuccess(await _runner.RunRequestAsync(request, cancellationToken), "创建 Android 虚拟机");
         }
 
-        var config = Path.Combine(
-            options.AvdHome ?? Path.Combine(
-                Environment.GetFolderPath(Environment.SpecialFolder.UserProfile),
-                ".android",
-                "avd"),
-            $"{options.AvdName}.avd",
-            "config.ini");
+        var config = options.AvdConfigPath;
         if (!File.Exists(config))
         {
             throw new FileNotFoundException("AVD 已创建但找不到配置文件。", config);
@@ -579,37 +580,50 @@ public sealed class RootedVmInstaller
         return await _runner.RunRequestAsync(request, cancellationToken);
     }
 
-    private async Task VerifyAndRecordAsync(
+    private async Task<bool> VerifyAndRecordAsync(
         AndroidSdkLayout layout,
         AndroidVmController controller,
         IProgress<SetupProgressState>? progress,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        string? rootProblem)
     {
         Report(progress, SetupStage.Verify);
         await WriteJournalAsync(SetupStage.Verify, cancellationToken);
-        if (await controller.GetStatusAsync(cancellationToken) != VmStatus.Running)
-        {
-            await controller.StartAsync(cancellationToken);
-        }
+        await EnsureRunningAsync(controller, cancellationToken);
 
-        await EnsureMagiskAppInstalledAsync(layout, cancellationToken);
-        var diagnostics = await controller.DiagnoseAsync(cancellationToken);
-        var policyAutomator = new MagiskPolicyAutomator(layout, _options, _runner);
-        if (!diagnostics.Contains("Root：正常（uid=0）", StringComparison.Ordinal))
+        var rootVerified = rootProblem is null;
+        if (rootVerified)
         {
-            await policyAutomator.GrantShellAsync(cancellationToken);
-            diagnostics = await controller.DiagnoseAsync(cancellationToken);
-            if (!diagnostics.Contains("Root：正常（uid=0）", StringComparison.Ordinal))
+            try
             {
-                throw new InvalidOperationException($"Root 最终验证失败。\n{diagnostics}");
+                await EnsureMagiskAppInstalledAsync(layout, cancellationToken);
+                var policyAutomator = new MagiskPolicyAutomator(layout, _options, _runner);
+                var diagnostics = await DiagnoseRunningAsync(controller, cancellationToken);
+                if (!IsRootVerified(diagnostics))
+                {
+                    await policyAutomator.GrantShellAsync(cancellationToken);
+                    // The grant flow can reboot the guest through Magisk's additional setup;
+                    // reconfirm the connection before the final Root diagnosis.
+                    diagnostics = await DiagnoseRunningAsync(controller, cancellationToken);
+                    if (!IsRootVerified(diagnostics))
+                    {
+                        throw new InvalidOperationException($"Root 最终验证失败。\n{diagnostics}");
+                    }
+                }
+                else
+                {
+                    await policyAutomator.PersistCurrentShellPolicyAsync(cancellationToken);
+                }
+            }
+            catch (Exception error) when (error is not OperationCanceledException)
+            {
+                // Root is optional: keep the install result and surface the reason.
+                rootVerified = false;
+                rootProblem = error.Message;
             }
         }
-        else
-        {
-            await policyAutomator.PersistCurrentShellPolicyAsync(cancellationToken);
-        }
 
-        await VerifyPersistentRootAndHealthAsync(layout, controller, cancellationToken);
+        await VerifyPersistentRootAndHealthAsync(layout, controller, cancellationToken, rootVerified);
 
         Directory.CreateDirectory(_paths.ProductRoot);
         var marker = new
@@ -618,6 +632,8 @@ public sealed class RootedVmInstaller
             sdkRoot = layout.Root,
             avdName = _options.AvdName,
             avdHome = _options.AvdHome,
+            rootVerified,
+            rootProblem,
             verifiedAtUtc = DateTimeOffset.UtcNow
         };
         await File.WriteAllTextAsync(
@@ -626,6 +642,7 @@ public sealed class RootedVmInstaller
             cancellationToken);
         Report(progress, SetupStage.Complete);
         await WriteJournalAsync(SetupStage.Complete, cancellationToken);
+        return rootVerified;
     }
 
     private async Task EnsureMagiskAppInstalledAsync(
@@ -667,19 +684,41 @@ public sealed class RootedVmInstaller
     private async Task VerifyPersistentRootAndHealthAsync(
         AndroidSdkLayout layout,
         AndroidVmController controller,
-        CancellationToken cancellationToken)
+        CancellationToken cancellationToken,
+        bool rootVerified)
     {
         var bootIdBefore = await ReadBootIdAsync(layout, cancellationToken);
+        var uptimeBefore = await ReadUptimeSecondsAsync(layout, cancellationToken);
         await controller.StopAsync(cancellationToken);
+        await EnsureEmulatorOfflineAsync(layout, cancellationToken);
         await controller.StartAsync(cancellationToken);
         var bootIdAfter = await ReadBootIdAsync(layout, cancellationToken);
-        if (string.Equals(bootIdBefore, bootIdAfter, StringComparison.Ordinal))
+        var uptimeAfter = await ReadUptimeSecondsAsync(layout, cancellationToken);
+        if (!DidGuestReboot(bootIdBefore, uptimeBefore, bootIdAfter, uptimeAfter))
         {
-            throw new InvalidOperationException("冷重启验证失败：Android boot ID 未发生变化。");
+            // Stop/Start status probes can transiently misread and skip the actual restart;
+            // verify deterministically and retry the whole cold cycle once.
+            await controller.StopAsync(cancellationToken);
+            await EnsureEmulatorOfflineAsync(layout, cancellationToken);
+            await controller.StartAsync(cancellationToken);
+            bootIdAfter = await ReadBootIdAsync(layout, cancellationToken);
+            uptimeAfter = await ReadUptimeSecondsAsync(layout, cancellationToken);
+        }
+        if (!DidGuestReboot(bootIdBefore, uptimeBefore, bootIdAfter, uptimeAfter))
+        {
+            throw new InvalidOperationException(
+                "冷重启验证失败：Android 系统未发生真正的重启（boot ID 与运行时长均未变化）。");
         }
 
-        var diagnostics = await controller.DiagnoseAsync(cancellationToken);
-        if (!diagnostics.Contains("Root：正常（uid=0）", StringComparison.Ordinal))
+        if (!rootVerified)
+        {
+            // Root is optional: keep the restart and graphics evidence, skip Root-owned probes.
+            await VerifyScreenshotAsync(layout, cancellationToken);
+            return;
+        }
+
+        var diagnostics = await DiagnoseRunningAsync(controller, cancellationToken);
+        if (!IsRootVerified(diagnostics))
         {
             throw new InvalidOperationException($"冷重启后 Root 未保持。{Environment.NewLine}{diagnostics}");
         }
@@ -718,6 +757,13 @@ public sealed class RootedVmInstaller
                 $"rm -f {healthFile}"),
             CancellationToken.None);
 
+        await VerifyScreenshotAsync(layout, cancellationToken);
+    }
+
+    private async Task VerifyScreenshotAsync(
+        AndroidSdkLayout layout,
+        CancellationToken cancellationToken)
+    {
         const string screenshot = "/data/local/tmp/rgvm-health.png";
         EnsureSuccess(await _runner.RunAsync(
             AndroidCommandFactory.Adb(
@@ -756,6 +802,109 @@ public sealed class RootedVmInstaller
             cancellationToken);
         EnsureSuccess(result, "读取 Android boot ID");
         return result.StandardOutput.Trim();
+    }
+
+    private async Task<double> ReadUptimeSecondsAsync(
+        AndroidSdkLayout layout,
+        CancellationToken cancellationToken)
+    {
+        var result = await _runner.RunAsync(
+            AndroidCommandFactory.Adb(
+                layout,
+                _options,
+                "shell",
+                "cat",
+                "/proc/uptime"),
+            cancellationToken);
+        EnsureSuccess(result, "读取 Android 运行时长");
+        var first = result.StandardOutput.Split([' ', '\t'], StringSplitOptions.RemoveEmptyEntries)
+            .FirstOrDefault();
+        return double.TryParse(first, System.Globalization.CultureInfo.InvariantCulture, out var uptime)
+            ? uptime
+            : -1;
+    }
+
+    /// <summary>
+    /// A real guest reboot shows a new boot_id, or — should a kernel/quirk reuse it — a clearly
+    /// younger uptime. Both signals together make the cold-restart evidence robust.
+    /// </summary>
+    private static bool DidGuestReboot(
+        string bootIdBefore,
+        double uptimeBefore,
+        string bootIdAfter,
+        double uptimeAfter) =>
+        !string.Equals(bootIdBefore, bootIdAfter, StringComparison.Ordinal) ||
+        (uptimeBefore > 0 && uptimeAfter > 0 && uptimeAfter < uptimeBefore);
+
+    private static bool IsRootVerified(string diagnostics) =>
+        diagnostics.Contains("Root：正常（uid=0）", StringComparison.Ordinal);
+
+    /// <summary>
+    /// A single "not running" answer can be a transient ADB misread, and acting on it would start
+    /// a second emulator over a live guest. Confirm twice before starting, then let the diagnosis
+    /// retry a few times so a guest that is still rebooting is not judged as failed.
+    /// </summary>
+    private static async Task EnsureRunningAsync(
+        AndroidVmController controller,
+        CancellationToken cancellationToken)
+    {
+        if (await controller.GetStatusAsync(cancellationToken) == VmStatus.Running) return;
+        await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+        if (await controller.GetStatusAsync(cancellationToken) == VmStatus.Running) return;
+        await controller.StartAsync(cancellationToken);
+    }
+
+    private static async Task<string> DiagnoseRunningAsync(
+        AndroidVmController controller,
+        CancellationToken cancellationToken)
+    {
+        string? diagnostics = null;
+        for (var attempt = 1; attempt <= 3; attempt++)
+        {
+            await EnsureRunningAsync(controller, cancellationToken);
+            diagnostics = await controller.DiagnoseAsync(cancellationToken);
+            if (diagnostics.Contains("虚拟机：运行中", StringComparison.Ordinal)) return diagnostics;
+            await Task.Delay(TimeSpan.FromSeconds(5), cancellationToken);
+        }
+
+        return diagnostics ?? string.Empty;
+    }
+
+    /// <summary>
+    /// Stop/Start status probes are based on transient ADB answers, so "already stopped" can be
+    /// wrong while the emulator is still alive. The cold-restart evidence requires a real stop:
+    /// keep issuing "emu kill" until the product serial reports offline twice in a row.
+    /// </summary>
+    private async Task EnsureEmulatorOfflineAsync(
+        AndroidSdkLayout layout,
+        CancellationToken cancellationToken)
+    {
+        var deadline = DateTimeOffset.UtcNow + TimeSpan.FromMinutes(2);
+        var consecutiveOffline = 0;
+        while (true)
+        {
+            var state = await _runner.RunAsync(
+                AndroidCommandFactory.Adb(layout, _options, "get-state"),
+                cancellationToken);
+            var online = state.ExitCode == 0 &&
+                string.Equals(state.StandardOutput.Trim(), "device", StringComparison.OrdinalIgnoreCase);
+            if (!online)
+            {
+                consecutiveOffline++;
+                if (consecutiveOffline >= 2) return;
+            }
+            else
+            {
+                consecutiveOffline = 0;
+                if (DateTimeOffset.UtcNow > deadline)
+                {
+                    throw new TimeoutException("冷重启验证前未能完全停止安卓虚拟机。");
+                }
+                await _runner.RunAsync(AndroidCommandFactory.StopEmulator(layout, _options), cancellationToken);
+            }
+
+            await Task.Delay(TimeSpan.FromSeconds(3), cancellationToken);
+        }
     }
 
     private async Task<string> DownloadAsync(

@@ -113,6 +113,15 @@ public sealed partial class AndroidDebugService : IDisposable
         }
         var host = Instance.Require();
         var state = await StateAsync(ct);
+        var rootError = (string?)null;
+        bool root;
+        try { root = (await ShellAsync("id", true, ct)).Contains("uid=0", StringComparison.Ordinal); }
+        catch (Exception error) when (error is DebugException or InvalidOperationException)
+        {
+            // Root is optional: an unavailable su must not fail the whole status observation.
+            root = false;
+            rootError = error.Message;
+        }
         return new
         {
             version = "0.5.1",
@@ -123,7 +132,8 @@ public sealed partial class AndroidDebugService : IDisposable
             memoryProtection = MemoryNotice?.Invoke(),
             session = $"{host.ProcessId}:{host.StartedAtUtcTicks}",
             state = new { bootCompleted = state.Boot, awake = state.Awake, locked = state.Locked, foreground = state.Foreground, rotation = state.Rotation },
-            root = (await ShellAsync("id", true, ct)).Contains("uid=0"),
+            root,
+            rootError,
             abi = (await ShellAsync("getprop ro.product.cpu.abilist; getprop ro.dalvik.vm.native.bridge", false, ct)).Trim()
         };
     }

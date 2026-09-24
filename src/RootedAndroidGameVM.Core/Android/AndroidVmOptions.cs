@@ -28,4 +28,19 @@ public sealed record AndroidVmOptions(
     public static AndroidVmOptions ProductDefault => ForPaths(InstallPaths.CreateDefault());
 
     public static AndroidVmOptions Default => ProductDefault;
+
+    /// <summary>Directory holding the AVD definition files; falls back to the Android default home.</summary>
+    public string AvdRoot => AvdHome ?? Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".android", "avd");
+
+    public string AvdDirectory => Path.Combine(AvdRoot, AvdName + ".avd");
+
+    public string AvdConfigPath => Path.Combine(AvdDirectory, "config.ini");
+
+    /// <summary>
+    /// True when the product AVD has been created. This is the authoritative installation proof:
+    /// <c>emulator -list-avds</c> intermittently prints nothing with a zero exit code, so it must
+    /// never be the only source for "the virtual machine is installed".
+    /// </summary>
+    public bool HasAvdConfiguration => File.Exists(AvdConfigPath);
 }

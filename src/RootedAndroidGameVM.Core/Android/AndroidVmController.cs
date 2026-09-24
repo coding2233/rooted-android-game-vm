@@ -44,12 +44,7 @@ public sealed class AndroidVmController : IAndroidVmLifecycle
             return VmStatus.NotInstalled;
         }
 
-        var avds = await _runner.RunRequestAsync(
-            AndroidCommandFactory.ListAvds(_layout, _options),
-            cancellationToken);
-        if (avds.ExitCode != 0 ||
-            !avds.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
-                .Any(name => string.Equals(name.Trim(), _options.AvdName, StringComparison.Ordinal)))
+        if (!await IsAvdInstalledAsync(cancellationToken))
         {
             return VmStatus.NotInstalled;
         }
@@ -70,6 +65,34 @@ public sealed class AndroidVmController : IAndroidVmLifecycle
                string.Equals(runningAvd.StandardOutput.Trim(), _options.AvdName, StringComparison.Ordinal)
             ? VmStatus.Running
             : VmStatus.Stopped;
+    }
+
+    /// <summary>
+    /// Confirms the product AVD exists. The AVD directory is checked first because
+    /// <c>emulator -list-avds</c> intermittently exits successfully without printing any name;
+    /// treating that empty output as "not installed" made a running virtual machine look missing.
+    /// The listing is only a fallback and is repeated once before it is trusted.
+    /// </summary>
+    private async Task<bool> IsAvdInstalledAsync(CancellationToken cancellationToken)
+    {
+        if (_options.HasAvdConfiguration) return true;
+
+        for (var attempt = 1; attempt <= 2; attempt++)
+        {
+            var avds = await _runner.RunRequestAsync(
+                AndroidCommandFactory.ListAvds(_layout, _options),
+                cancellationToken);
+            if (avds.ExitCode == 0 &&
+                avds.StandardOutput.Split(['\r', '\n'], StringSplitOptions.RemoveEmptyEntries)
+                    .Any(name => string.Equals(name.Trim(), _options.AvdName, StringComparison.Ordinal)))
+            {
+                return true;
+            }
+
+            if (attempt == 1) await Task.Delay(TimeSpan.FromMilliseconds(250), cancellationToken);
+        }
+
+        return false;
     }
 
     public async Task StartAsync(CancellationToken cancellationToken = default)

@@ -319,7 +319,7 @@ public partial class MainWindow : Window
                 _installationCancellation.Token);
             var paths = InstallPaths.FromProductRoot(selectedRoot, pathService.Read());
             var options = AndroidVmOptions.ForPaths(paths) with { Port = _port, Serial = $"emulator-{_port}" };
-            await new RootedVmInstaller(paths, options: options).InstallAsync(
+            var rootVerified = await new RootedVmInstaller(paths, options: options).InstallAsync(
                 sdkLicenseAccepted: true,
                 progress,
                 _installationCancellation.Token);
@@ -328,10 +328,17 @@ public partial class MainWindow : Window
                     Path.Combine(AppContext.BaseDirectory, "RootedAndroidGameVM.exe"));
             _installationSucceeded = true;
             InstallButton.Content = "安装完成";
-            ProgressTitleText.Text = "安装完成";
-            ProgressDetailText.Text = "Root、ADB 与虚拟机启动均已通过验证。现在可以关闭安装器。";
-            MessageBox.Show(this, "安装与 Root 验证已完成。以后直接双击桌面启动器即可。",
-                "安装完成", MessageBoxButton.OK, MessageBoxImage.Information);
+            ProgressTitleText.Text = rootVerified ? "安装完成" : "安装完成（Root 未验证）";
+            ProgressDetailText.Text = rootVerified
+                ? "Root、ADB 与虚拟机启动均已通过验证。现在可以关闭安装器。"
+                : "虚拟机与 ADB 已通过验证；Root 未能自动配置，已按可选项跳过。启动器的诊断页可查看 Root 状态，重新运行安装器可重试 Root。";
+            MessageBox.Show(this,
+                rootVerified
+                    ? "安装与 Root 验证已完成。以后直接双击桌面启动器即可。"
+                    : "安装已完成，但 Root 未能自动验证，已按可选项跳过。\n\n基础功能（启动安卓、安装与运行应用）不受影响；私有数据导出等 Root 功能暂不可用。\n\n可稍后重新运行安装器（更新并验证）重试 Root。",
+                rootVerified ? "安装完成" : "安装完成（Root 未验证）",
+                MessageBoxButton.OK,
+                rootVerified ? MessageBoxImage.Information : MessageBoxImage.Warning);
         }
         catch (OperationCanceledException)
         {

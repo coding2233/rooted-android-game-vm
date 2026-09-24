@@ -1,4 +1,6 @@
 using RootedAndroidGameVM.Core.Android;
+using RootedAndroidGameVM.Core.Processes;
+using RootedAndroidGameVM.Core.Ui;
 
 namespace RootedAndroidGameVM.Core.Tests;
 
@@ -187,6 +189,72 @@ public sealed class AndroidControlContractTests
         Assert.Equal(
             ["-s", options.Serial, "shell", "wm", "dismiss-keyguard"],
             AndroidCommandFactory.DismissKeyguard(layout, options).Arguments);
+    }
+
+    [Fact]
+    public void Avd_configuration_path_follows_the_configured_avd_home()
+    {
+        var options = AndroidVmOptions.Default with { AvdHome = @"D:\Product\Avd" };
+
+        Assert.Equal(
+            Path.Combine(@"D:\Product\Avd", "rooted_android_game_vm_api35.avd", "config.ini"),
+            options.AvdConfigPath);
+        Assert.False(options.HasAvdConfiguration);
+    }
+
+    [Fact]
+    public async Task Installed_avd_is_not_reported_missing_when_the_emulator_listing_prints_nothing()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "rgvm-avd-status", Guid.NewGuid().ToString("N"));
+        var sdk = Path.Combine(root, "sdk");
+        Directory.CreateDirectory(Path.Combine(sdk, "emulator"));
+        Directory.CreateDirectory(Path.Combine(sdk, "platform-tools"));
+        File.WriteAllText(Path.Combine(sdk, "emulator", "emulator.exe"), "placeholder");
+        File.WriteAllText(Path.Combine(sdk, "platform-tools", "adb.exe"), "placeholder");
+        var options = AndroidVmOptions.Default with { AvdHome = Path.Combine(root, "avd") };
+        Directory.CreateDirectory(options.AvdDirectory);
+        File.WriteAllText(options.AvdConfigPath, "hw.ramSize=3072");
+        try
+        {
+            var controller = new AndroidVmController(
+                AndroidSdkLayout.FromRoot(sdk), options, new EmptyAvdListingRunner());
+
+            Assert.Equal(VmStatus.Running, await controller.GetStatusAsync());
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    [Fact]
+    public async Task Missing_avd_configuration_is_reported_as_not_installed()
+    {
+        var root = Path.Combine(Path.GetTempPath(), "rgvm-avd-missing", Guid.NewGuid().ToString("N"));
+        var sdk = Path.Combine(root, "sdk");
+        Directory.CreateDirectory(Path.Combine(sdk, "emulator"));
+        Directory.CreateDirectory(Path.Combine(sdk, "platform-tools"));
+        File.WriteAllText(Path.Combine(sdk, "emulator", "emulator.exe"), "placeholder");
+        File.WriteAllText(Path.Combine(sdk, "platform-tools", "adb.exe"), "placeholder");
+        var options = AndroidVmOptions.Default with { AvdHome = Path.Combine(root, "avd") };
+        try
+        {
+            var controller = new AndroidVmController(
+                AndroidSdkLayout.FromRoot(sdk), options, new EmptyAvdListingRunner());
+
+            Assert.Equal(VmStatus.NotInstalled, await controller.GetStatusAsync());
+        }
+        finally { Directory.Delete(root, recursive: true); }
+    }
+
+    private sealed class EmptyAvdListingRunner : IProcessRunner
+    {
+        public Task<ProcessResult> RunAsync(
+            ProcessSpec spec,
+            CancellationToken cancellationToken = default)
+        {
+            // "emulator -list-avds" really does this on Windows: exit code 0 and no output.
+            if (spec.Arguments.Contains("-list-avds")) return Task.FromResult(new ProcessResult(0, string.Empty, string.Empty));
+            var output = spec.Arguments.Contains("get-state") ? "device" : "rooted_android_game_vm_api35";
+            return Task.FromResult(new ProcessResult(0, output, string.Empty));
+        }
     }
 
     [Fact]

@@ -77,7 +77,7 @@ public sealed class VmMemoryPolicyTests
                 readHostMemory: () => new(16111, 6000, 32, 63, 16000));
             var error = await Assert.ThrowsAsync<HostMemoryInsufficientException>(() => controller.StartAsync());
             Assert.Equal("host_memory_low", DebugReply.Failure(error).Error!.Code);
-            Assert.Equal(2, runner.Calls.Count);
+            Assert.Contains(runner.Calls, call => call.Arguments.Contains("get-state"));
             Assert.DoesNotContain(runner.Calls, call => call.Arguments.Contains("shell") || call.Arguments.Contains("wait-for-device"));
         }
         finally { Directory.Delete(root, true); }
